@@ -1,6 +1,7 @@
 # encoding: utf-8
 require "logstash/inputs/threadable"
 require "logstash/namespace"
+require "logstash/inputs/rabbitmq/bunny"
 
 # Pull events from a RabbitMQ exchange.
 #
@@ -110,8 +111,7 @@ class LogStash::Inputs::Bunny < LogStash::Inputs::Threadable
     super
   end
 
-  require "logstash/inputs/rabbitmq/bunny"
-  include BunnyImpl
+  include ::LogStash::Inputs::RabbitMQ::BunnyImpl
 
   def register
     super
@@ -119,8 +119,9 @@ class LogStash::Inputs::Bunny < LogStash::Inputs::Threadable
     if @ssl and @ssl_cert
       @session[:tls_cert]             = @ssl_cert
       @session[:tls_key]              = @ssl_key
-      @session[:tls_ca_certificates]  = [@ssl_ca_Cert]
+      @session[:tls_ca_certificates]  = [@ssl_ca_cert] if @ssl_ca_cert
       @session[:verify_peer]          = @verify_peer
+    end
   end
 end # class LogStash::Inputs::RabbitMQ
 
