@@ -117,10 +117,10 @@ class LogStash::Inputs::Bunny < LogStash::Inputs::Threadable
     super
 
     if @ssl and @ssl_cert
-      @session[:tls_cert]             = @ssl_cert
-      @session[:tls_key]              = @ssl_key
-      @session[:tls_ca_certificates]  = [@ssl_ca_cert] if @ssl_ca_cert
-      @session[:verify_peer]          = @verify_peer
+      @settings[:tls_cert]             = @ssl_cert
+      @settings[:tls_key]              = @ssl_key
+      @settings[:tls_ca_certificates]  = [@ssl_ca_cert] if @ssl_ca_cert
+      @settings[:verify_peer]          = @verify_peer
     end
   end
 end # class LogStash::Inputs::RabbitMQ
