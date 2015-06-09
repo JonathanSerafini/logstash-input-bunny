@@ -167,6 +167,7 @@ class LogStash::Inputs::Bunny < LogStash::Inputs::Threadable
       message(:warn, "ssl handshake failed, retrying", 
               attempt: connection_attempt)
       connection_attempt += 1
+      sleep(5)
       retry unless connection_attempt > 3
     end
 
@@ -218,7 +219,12 @@ class LogStash::Inputs::Bunny < LogStash::Inputs::Threadable
         consumer.channel.acknowledge(delivery_info.delivery_tag) if @ack
       end
 
-      consumer.queue.subscribe_with(consumer, block: true)
+      consumer.queue.subscribe_with(consumer, block: false)
+    end
+
+    # Join all consummer threads to the current thread and wait to complete
+    @consummers.each do |name, consumer|
+      consumer.channel.work_pool.join
     end
   end
 end # class LogStash::Inputs::RabbitMQ
