@@ -13,114 +13,212 @@ require "logstash/inputs/rabbitmq/bunny"
 #
 # * Bunny - <https://github.com/ruby-amqp/bunny>
 class LogStash::Inputs::Bunny < LogStash::Inputs::Threadable
-
   config_name "bunny"
 
   #
   # Connection
   #
 
-  # RabbitMQ server address
-  config :host, :validate => :string, :required => true
+  config :host,         validate: :string, required: true
+  config :port,         validate: :number, default: 5672
+  config :user,         validate: :string, default: "guest"
+  config :password,     validate: :password, default: "guest"
+  config :vhost,        validate: :string, default: "/"
 
-  # RabbitMQ port to connect on
-  config :port, :validate => :number, :default => 5672
-
-  # RabbitMQ username
-  config :user, :validate => :string, :default => "guest"
-
-  # RabbitMQ password
-  config :password, :validate => :password, :default => "guest"
-
-  # The vhost to use. If you don't know what this is, leave the default.
-  config :vhost, :validate => :string, :default => "/"
-
-  # Enable or disable SSL
-  config :ssl,          :validate => :boolean, :default => false
-  config :ssl_cert,     :validate => :string
-  config :ssl_key,      :validate => :string
-  config :ssl_ca_cert,  :validate => :string
-
-  # Validate SSL certificate
-  config :verify_ssl,   :validate => :boolean, :default => false
-  config :verify_peer,  :validate => :boolean, :default => false
-
-  # Enable or disable logging
-  config :debug, :validate => :boolean, :default => false, :deprecated => "Use the logstash --debug flag for this instead."
-
-
+  config :ssl,          validate: :boolean, :default => false
+  config :ssl_cert,     validate: :string
+  config :ssl_key,      validate: :string
+  config :ssl_ca_cert,  validate: :string
+  config :verify_peer,  validate: :boolean, default: false
 
   #
   # Queue & Consumer
   #
 
-  # The name of the queue Logstash will consume events from.
-  config :queue, :validate => :string, :default => ""
+  #
+  # The Bunny plugin's approach differs from Logstash's RabbitMQ plugin in that
+  # we require an exchange so that we can create & bind multiple queues based
+  # on routing keys.
+  #
+  # In addition, rather than accepting a single string for the queue, we now
+  # accept a hash of queue > routing_key pairs. 
+  #
 
-  # Is this queue durable? (aka; Should it survive a broker restart?)
-  config :durable, :validate => :boolean, :default => false
+  config :exchange,     validate: :string, required: true
+  config :queues,       validate: :hash, required: true 
 
-  # Should the queue be deleted on the broker when the last consumer
-  # disconnects? Set this option to `false` if you want the queue to remain
-  # on the broker, queueing up messages until a consumer comes along to
-  # consume them.
-  config :auto_delete, :validate => :boolean, :default => false
+  config :prefetch,     validate: :number, default: 20
+  config :ack,          validate: :boolean, default: true
+
+  #
+  # Queue Durability / Persistence
+  #
+
+  # Create durable queues so that they survive broker restarts
+  config :durable,      validate: :boolean, default: false
+
+  # Delete queues once the last consumer disconnects.
+  config :auto_delete,  validate: :boolean, default: false
 
   # Is the queue exclusive? Exclusive queues can only be used by the connection
   # that declared them and will be deleted when it is closed (e.g. due to a Logstash
   # restart).
-  config :exclusive, :validate => :boolean, :default => false
-
-  # Extra queue arguments as an array.
-  # To make a RabbitMQ queue mirrored, use: `{"x-ha-policy" => "all"}`
-  config :arguments, :validate => :array, :default => {}
-
-  # Prefetch count. Number of messages to prefetch
-  config :prefetch_count, :validate => :number, :default => 256
-
-  # Enable message acknowledgement
-  config :ack, :validate => :boolean, :default => true
+  config :exclusive,    validate: :boolean, default: false
 
   # Passive queue creation? Useful for checking queue existance without modifying server state
-  config :passive, :validate => :boolean, :default => false
-
-
+  config :passive,      validate: :boolean, default: false
 
   #
-  # (Optional) Exchange binding
+  # Initialization
   #
-
-  # Optional.
-  #
-  # The name of the exchange to bind the queue to.
-  config :exchange, :validate => :string
-
-  # Optional.
-  #
-  # The routing key to use when binding a queue to the exchange.
-  # This is only relevant for direct or topic exchanges.
-  #
-  # * Routing keys are ignored on fanout exchanges.
-  # * Wildcards are not valid on direct exchanges.
-  config :key, :validate => :string, :default => "logstash"
-
 
   def initialize(params)
     params["codec"] = "json" if !params["codec"]
-
     super
   end
 
-  include ::LogStash::Inputs::RabbitMQ::BunnyImpl
+  def input_tag
+    "#{@vhost}/#{@exchange}"
+  end
+
+  def message(severity, message, data={})
+    message = "Bunny[#{input_tag}] #{message}"
+    @logger.send(severity, message, data)
+  end
 
   def register
-    super
+    require "bunny"
+
+    message(:info, "registering input", host: @host)
+
+    @vhost       ||= Bunny::DEFAULT_HOST
+    @port        ||= AMQ::Protocol::DEFAULT_PORT
+
+    @settings = {
+      vhost: @vhost,
+      host:  @host,
+      port:  @port,
+      user:  @user,
+      pass:  @password.value,
+      tls:   @ssl,
+      automatically_recover: false
+    }
+
+    if @ssl 
+      @settings[:verify_peer] = @verify_peer
+    end
 
     if @ssl and @ssl_cert
-      @settings[:tls_cert]             = @ssl_cert
-      @settings[:tls_key]              = @ssl_key
-      @settings[:tls_ca_certificates]  = [@ssl_ca_cert] if @ssl_ca_cert
-      @settings[:verify_peer]          = @verify_peer
+      @settings[:tls_cert]            = @ssl_cert
+      @settings[:tls_key]             = @ssl_key
+      @settings[:tls_ca_certificates] = [@ssl_ca_cert] if @ssl_ca_cert
+    end
+  end
+  
+  def run(output_queue)
+    @output_queue = output_queue
+    delay = Bunny::Session::DEFAULT_NETWORK_RECOVERY_INTERVAL * 2
+
+    begin
+      setup
+      consume
+    rescue Bunny::NetworkFailure, Bunny::ConnectionClosedError,
+           Bunny::ConnectionLevelException, Bunny::TCPConnectionFailed,
+           OpenSSL::SSL::SSLError => e
+
+      @consumers.each do |name, consumer|
+        error = "connection error: #{e.message}. Retrying in #{delay} seconds."
+        message(:error, error)
+        consumer.channel.maybe_kill_consumer_work_pool!
+      end
+
+      sleep delay
+      retry
+
+    rescue LogStash::ShutdownSignal
+      release
+
+    rescue Exception => e
+      message(:error, "unhandled exception: #{e.inspect}", backtrace: e.backtrace)
+
+    end
+  end
+
+  def teardown
+    release
+    finished
+  end
+
+  def setup
+    return if terminating?
+
+    #
+    # With multiple threads, Logstash/Jruby/Bunny combo seems to fail ssl
+    # handshake on the first 1-2 connection attempts when restarting Logstash.
+    #
+    # optionally, look at : settings[:connect_timeout]
+    #
+    begin
+      connection_attempt ||= 1
+      message(:debug, "connecting")
+      @connection = Bunny.new(@settings)
+      @connection.start
+    rescue OpenSSL::SSL::SSLError
+      message(:warn, "ssl handshake failed, retrying", 
+              attempt: connection_attempt)
+      connection_attempt += 1
+      retry unless connection_attempt > 3
+    end
+
+    @consumers = {}
+    @queues.each do |queue_name, routing_key|
+      consumer = "#{queue_name}#{routing_key}"
+      message(:debug, "creating consumer #{consumer}")
+
+      channel = @connection.create_channel.tap do |channel|
+        channel.prefetch(@prefetch)
+      end
+      
+      queue = channel.queue(@queue,
+                            durable: @durable,
+                            auto_delete: @auto_delete,
+                            exclusive: @exclusive,
+                            passive: @passive)
+
+      queue.bind(@exchange, routing_key: routing_key)
+
+      @consumers[consumer] = Bunny::Consumer.
+                              new(channel, queue, nil, !@ack, @exclusive)
+    end
+  end
+
+  def release
+    @consumers.each do |name, consumer|
+      consumer.cancel
+      consumer.channel.close if consumer.channel and consumer.channel.open?
+    end
+    @consumers = []
+
+    @connection.close if @connection and @connection.open?
+  end
+
+  def consume
+    @consumers.each do |name, consumer|
+      message(:info, "consuming events from #{name}")
+
+      consumer.on_delivery do |delivery_info, properties, data|
+        @codec.decode(data) do |event|
+          decorate(event)
+          event["bunny"] ||= {}
+          event["bunny"]["key"] = delivery_info.routing_key
+          event["bunny"]["queue"] = consumer.queue_name
+          @output_queue << event
+        end
+
+        consumer.channel.acknowledge(delivery_info.delivery_tag) if @ack
+      end
+
+      consumer.queue.subscribe_with(consumer, block: true)
     end
   end
 end # class LogStash::Inputs::RabbitMQ
