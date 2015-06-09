@@ -180,7 +180,7 @@ class LogStash::Inputs::Bunny < LogStash::Inputs::Threadable
         channel.prefetch(@prefetch)
       end
       
-      queue = channel.queue(@queue,
+      queue = channel.queue(queue_name,
                             durable: @durable,
                             auto_delete: @auto_delete,
                             exclusive: @exclusive,
